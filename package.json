@@ -1,0 +1,16 @@
+{
+  "name": "flight-chatbot-lookup",
+  "version": "1.0.0",
+  "description": "Lean Cloud Run endpoint for validating date and fetching flight info from FlightAware AeroAPI",
+  "main": "index.js",
+  "type": "commonjs",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "express": "^4.19.2"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
