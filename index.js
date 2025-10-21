@@ -36,9 +36,10 @@ function flightsUrl(ident, start, end) {
   return `${CFG.AERO_BASE}/flights/${encodeURIComponent(ident)}?start=${start}&end=${end}`;
 }
 
-// === ENDPOINT ===
-// POST /chat/lookup  { "flightIdent": "AK6322", "departureDate": "2025-10-21" }
-app.post('/chat/lookup', async (req, res) => {
+// === ROUTES ===
+// POST /webhook/chat
+// Body: { "flightIdent": "AK6322", "departureDate": "2025-10-21" }
+app.post('/webhook/chat', async (req, res) => {
   try {
     const { flightIdent, departureDate } = req.body || {};
     if (!flightIdent || !departureDate) {
@@ -60,7 +61,6 @@ app.post('/chat/lookup', async (req, res) => {
     });
 
     if (!r.ok) {
-      // Treat provider errors as “no flights found” for a simple UX
       return res.status(200).json({ ok: false, message: 'No flights found' });
     }
 
@@ -70,7 +70,7 @@ app.post('/chat/lookup', async (req, res) => {
       return res.status(200).json({ ok: false, message: 'No flights found' });
     }
 
-    // Pick the instance closest to day start by scheduled_out (fast & simple)
+    // Pick instance closest to day start by scheduled_out (simple & fast)
     const base = parsed.start;
     const chosen = flights
       .map(f => {
@@ -79,23 +79,25 @@ app.post('/chat/lookup', async (req, res) => {
       })
       .sort((a, b) => a.score - b.score)[0].f;
 
-    // Return fields, all separate vars
+    // Return separated vars
     return res.status(200).json({
       ok: true,
       message: 'Match',
       flight_no: chosen.ident || null,
       departure_date_time: chosen.scheduled_out || chosen.estimated_out || null,
-      departing_from: chosen.origin?.airport_code || chosen.origin?.code || null,       // IATA first, fallback ICAO
+      departing_from: chosen.origin?.airport_code || chosen.origin?.code || null, // IATA first, fallback ICAO
       departure_gate: chosen.gate_origin || null,
       arrival_date_time: chosen.scheduled_in || chosen.estimated_in || null,
       arriving_at: chosen.destination?.airport_code || chosen.destination?.code || null,
       arrival_gate: chosen.gate_destination || null
     });
   } catch (e) {
-    console.error('SERVER_ERROR:', e.message);
-    return res.status(200).json({ ok: false, message: 'No flights found' });            // If no flights are found
+    if (CFG.DEBUG_LOG) console.error('SERVER_ERROR:', e);
+    return res.status(200).json({ ok: false, message: 'No flights found' });
   }
 });
+
+// (Future) POST /webhook/subscribing  ← add later for creating alert subscriptions
 
 // === SERVER START ===
 const PORT = process.env.PORT || 8080;
