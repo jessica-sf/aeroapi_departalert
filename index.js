@@ -1,5 +1,7 @@
 /************************************************************
- * Flight Alert Subs for SleekFlow — /webhook/chat (Lean)
+ * Flight Alert Subs for SleekFlow — /webhook/chat 
+ * - Airport names for departing/arriving
+ * - Times formatted: DD-MM-YYYY HH:mm (Area/City GMT+X)
  ************************************************************/
 
 // === CONFIGURATION ===
@@ -10,29 +12,17 @@ const CFG = {
 };
 
 // === DEPENDENCIES ===
-// Using Node 20 global fetch; only Express is needed.
 const express = require('express');
-
-// === INIT ===
 const app = express();
 app.use(express.json({ limit: '128kb' }));
 
-// === SECTION: CONSTANTS / MAPS ===
-// Minimal IATA → ICAO map. Extend as needed for your region.
+// Minimal IATA → ICAO map (extend as needed)
 const IATA_TO_ICAO = {
-  AK: 'AXM', // AirAsia
-  MH: 'MAS', // Malaysia Airlines
-  SQ: 'SIA', // Singapore Airlines
-  TR: 'TGW', // Scoot
-  OD: 'MXD', // Batik Air Malaysia (Malindo)
-  QZ: 'AWQ', // Indonesia AirAsia
-  FD: 'AIQ', // Thai AirAsia
-  '6E': 'IGO', // IndiGo
-  GA: 'GIA', // Garuda Indonesia
+  AK: 'AXM', MH: 'MAS', SQ: 'SIA', TR: 'TGW', OD: 'MXD',
+  QZ: 'AWQ', FD: 'AIQ', '6E': 'IGO', GA: 'GIA',
 };
 
-// === SECTION: HELPERS ===
-// -- Validate YYYY-MM-DD → return start-of-day UTC (ms) or null
+// === HELPERS ===
 function parseYmdToStartMs(ymd) {
   const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(ymd || '').trim());
   if (!m) return null;
@@ -40,38 +30,25 @@ function parseYmdToStartMs(ymd) {
   const yr = +yyyy, mon = +mm, day = +dd;
   const startMs = Date.UTC(yr, mon - 1, day, 0, 0, 0, 0);
   const chk = new Date(startMs);
-  if (chk.getUTCFullYear() !== yr || (chk.getUTCMonth() + 1) !== mon || chk.getUTCDate() !== day) {
-    return null; // catches things like 2025-02-31
-  }
+  if (chk.getUTCFullYear() !== yr || (chk.getUTCMonth() + 1) !== mon || chk.getUTCDate() !== day) return null;
   return startMs;
 }
 
-// -- Build URLs
 function buildFlightsUrl(ident, start, end, mode) {
   const base = `${CFG.AERO_BASE}/flights/${encodeURIComponent(ident)}`;
-  if (mode === 'date') {
-    // Mirror working portal style: start=YYYY-MM-DD (no end)
-    return `${base}?start=${start}`; // start is a YYYY-MM-DD string here
-  }
-  // Epoch window
-  return `${base}?start=${start}&end=${end}`; // start/end are seconds since epoch
+  if (mode === 'date') return `${base}?start=${start}`;          // start as 'YYYY-MM-DD'
+  return `${base}?start=${start}&end=${end}`;                    // epoch seconds
 }
 
-// -- Fetch wrapper (returns {ok,status,json,raw})
 async function fetchJson(url) {
   const r = await fetch(url, {
-    headers: {
-      'Accept': 'application/json; charset=UTF-8',
-      'x-apikey': CFG.AERO_KEY,
-    },
+    headers: { 'Accept': 'application/json; charset=UTF-8', 'x-apikey': CFG.AERO_KEY },
   });
   const text = await r.text();
-  let json;
-  try { json = JSON.parse(text); } catch { json = null; }
+  let json; try { json = JSON.parse(text); } catch { json = null; }
   return { ok: r.ok, status: r.status, json, raw: text, url };
 }
 
-// -- Pick the flight instance nearest to the day start by scheduled_out
 function pickBestFlight(flights, baseStartSec) {
   if (!Array.isArray(flights) || flights.length === 0) return null;
   const chosen = flights
@@ -83,42 +60,59 @@ function pickBestFlight(flights, baseStartSec) {
   return chosen || null;
 }
 
+// Format ISO → "DD-MM-YYYY HH:mm (Area/City GMT+X)"
+function formatLocal(iso, tz) {
+  if (!iso) return null;
+  try {
+    const d = new Date(iso);
+    const fmt = new Intl.DateTimeFormat('en-GB', {
+      timeZone: tz || 'UTC',
+      year: 'numeric', month: '2-digit', day: '2-digit',
+      hour: '2-digit', minute: '2-digit',
+      hour12: false,
+      timeZoneName: 'short' // usually gives "GMT+8"
+    });
+    const parts = Object.fromEntries(fmt.formatToParts(d).map(p => [p.type, p.value]));
+    const dd = parts.day, mm = parts.month, yyyy = parts.year, HH = parts.hour, MM = parts.minute;
+    const tzLabel = tz || 'UTC';
+    const tzShort = parts.timeZoneName || 'GMT';
+    return `${dd}-${mm}-${yyyy} ${HH}:${MM} (${tzLabel} ${tzShort})`;
+  } catch {
+    return iso; // fallback
+  }
+}
+
 // === ROUTES ===
-// -- POST /webhook/chat
+// POST /webhook/chat
 // Body: { "flightIdent": "AK6322", "departureDate": "2025-10-22" }
 app.post('/webhook/chat', async (req, res) => {
   const { flightIdent, departureDate } = req.body || {};
   const debug = {};
 
-  // Basic input checks
   if (!flightIdent || !departureDate) {
     return res.status(200).json({ ok: false, message: 'Invalid Date' });
   }
 
-  // Validate date format and compute midnight UTC
   const startMs = parseYmdToStartMs(departureDate);
   if (startMs == null) {
     return res.status(200).json({ ok: false, message: 'Invalid Date' });
   }
 
-  // Build a wider epoch window (-12h, +36h) to avoid UTC edge misses
-  const startEpoch = Math.floor((startMs - 12 * 3600 * 1000) / 1000);
-  const endEpoch   = Math.floor((startMs + 36 * 3600 * 1000) / 1000);
+  const startEpoch = Math.floor((startMs - 12 * 3600 * 1000) / 1000); // -12h
+  const endEpoch   = Math.floor((startMs + 36 * 3600 * 1000) / 1000); // +36h
   const baseStartSec = Math.floor(startMs / 1000);
   if (CFG.DEBUG_LOG) debug.window = { startEpoch, endEpoch };
 
-  // Normalize ident
   const identRaw = String(flightIdent).toUpperCase().replace(/\s+/g, '');
 
   try {
-    // 1) Try provider-style: start=YYYY-MM-DD (no end)
+    // 1) Try provider-style: start=YYYY-MM-DD
     const url1 = buildFlightsUrl(identRaw, departureDate, null, 'date');
     const q1 = await fetchJson(url1);
     if (CFG.DEBUG_LOG) debug.try1 = { url: q1.url, status: q1.status };
-
     let flights = (q1.ok && q1.json && Array.isArray(q1.json.flights)) ? q1.json.flights : [];
 
-    // 2) If none, fall back to epoch window
+    // 2) Fallback: epoch window
     if (flights.length === 0) {
       const url2 = buildFlightsUrl(identRaw, startEpoch, endEpoch, 'epoch');
       const q2 = await fetchJson(url2);
@@ -126,7 +120,7 @@ app.post('/webhook/chat', async (req, res) => {
       flights = (q2.ok && q2.json && Array.isArray(q2.json.flights)) ? q2.json.flights : [];
     }
 
-    // 3) If still none and ident looks IATA (2 letters + digits), map to ICAO and retry date-style
+    // 3) Fallback: map IATA → ICAO and retry (date mode)
     if (flights.length === 0) {
       const m = /^([A-Z]{2})(\d{1,5})$/.exec(identRaw);
       if (m && IATA_TO_ICAO[m[1]]) {
@@ -140,31 +134,30 @@ app.post('/webhook/chat', async (req, res) => {
       }
     }
 
-    // Final check
     if (flights.length === 0) {
-      return res.status(200).json({
-        ok: false,
-        message: 'No flights found',
-        ...(CFG.DEBUG_LOG ? { debug } : {}),
-      });
+      return res.status(200).json({ ok: false, message: 'No flights found', ...(CFG.DEBUG_LOG ? { debug } : {}) });
     }
 
-    // Pick best instance and return the 7 fields
     const chosen = pickBestFlight(flights, baseStartSec) || flights[0];
-    const payload = {
+
+    // Choose times (scheduled preferred; fallback to estimated) and format in local airport TZs
+    const depISO = chosen.scheduled_out || chosen.estimated_out || null;
+    const arrISO = chosen.scheduled_in  || chosen.estimated_in  || null;
+    const depTZ  = chosen.origin?.timezone || 'UTC';
+    const arrTZ  = chosen.destination?.timezone || 'UTC';
+
+    return res.status(200).json({
       ok: true,
       message: 'Match',
       flight_no: chosen.ident || null,
-      departure_date_time: chosen.scheduled_out || chosen.estimated_out || null,
-      departing_from: chosen.origin?.airport_code || chosen.origin?.code || null,    // IATA first, fallback ICAO
+      departure_date_time: formatLocal(depISO, depTZ),
+      departing_from: chosen.origin?.name || null,          // <-- airport name
       departure_gate: chosen.gate_origin || null,
-      arrival_date_time: chosen.scheduled_in || chosen.estimated_in || null,
-      arriving_at: chosen.destination?.airport_code || chosen.destination?.code || null,
+      arrival_date_time: formatLocal(arrISO, arrTZ),
+      arriving_at: chosen.destination?.name || null,        // <-- airport name
       arrival_gate: chosen.gate_destination || null,
-    };
-    if (CFG.DEBUG_LOG) payload.debug = debug;
-    return res.status(200).json(payload);
-
+      ...(CFG.DEBUG_LOG ? { debug } : {})
+    });
   } catch (err) {
     if (CFG.DEBUG_LOG) {
       debug.error = err?.message || String(err);
